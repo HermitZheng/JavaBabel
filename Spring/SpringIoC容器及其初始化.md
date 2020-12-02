@@ -14,7 +14,7 @@ Beanfactory作为最基本的上级接口，该系列只实现了容器的最基
 
 ## 容器接口设计路线
 
-![image-20201125145024557](/home/zhuqiu/snap/typora/23/.config/Typora/typora-user-images/image-20201125145024557.png)
+![](./SpringImages/接口继承路线.png)
 
 ### BeanFactory
 
@@ -78,7 +78,7 @@ IoC容器的初始化是由**refresh()**方法来启动的。具体来说，这�
 
 对BeanDefinition资源定位的过程，最初是由**refresh**来触发的，而这个refresh的调用是在FileSystemXmlBeanFactory的**构造函数**中启动的。refresh中包含了许多操作，这里先看一下关于Resource定位和加载的方法。
 
-<img src="/home/zhuqiu/MarkdownNote/SpringImages/Spring Bean的定位.png" style="zoom: 67%;" />
+<img src="./SpringImages/Spring Bean的定位.png" style="zoom: 67%;" />
 
 其中最重要的就是**loadBeanDefinitions**及其相关的重写、重载的方法了。
 
@@ -86,7 +86,7 @@ IoC容器的初始化是由**refresh()**方法来启动的。具体来说，这�
 
 ConfigurableListableBeanFactory实现了 BeanFactory 下面一层的所有三个接口，它只有一个实现类 DefaultListableBeanFactory，而这个实现类通过实现右边的 AbstractAutowireCapableBeanFactory 来获得了许多特性，因而几乎是功能最多的BeanFactory了。
 
-![](/home/zhuqiu/MarkdownNote/SpringImages/DefaultListableBeanFactory.png)
+![](./SpringImages/DefaultListableBeanFactory.png)
 
 ### BeanDefinitions载入
 
@@ -350,5 +350,5 @@ InitializingBean接口、Disposable接口底层使用**类型强转.方法名()*
 
 **某个Bean的afterPropertiesSet()方法执行完毕才会执行下一个Bean的afterPropertiesSet()方法**，因此不建议在afterPropertiesSet()方法中写处理时间太长的方法
 
-<img src="/home/zhuqiu/MarkdownNote/SpringImages/Spring生命周期（概要）.png" style="zoom:80%;" />
+<img src="./SpringImages/Spring生命周期（概要）.png" style="zoom:80%;" />
 
