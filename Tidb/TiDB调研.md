@@ -1,19 +1,69 @@
-
+# TiDB调研
 
 ## 总体架构
 
+![](.\image\TiDB整体架构.png)
 
+### **TiDB** **特点**
 
+TiDB 结合了传统的 RDBMS 和 NoSQL 的最佳特性，兼容 MySQL 协议，支持无限的水平扩展，具备强一致性和高可用性，具有如下的特性：
 
+1. **高度兼容 MySQL**，大多数情况下**无需修改代码**即可从 MySQL 轻松迁移至 TiDB，即使**已经分库分表的 MySQL 集群**亦可通过 TiDB 提供的迁移工具进行实时迁移。
+2. **水平弹性扩展**，通过简单地增加新节点即可实现 TiDB 的水平扩展，按需扩展吞吐或存储，轻松应对高并发、海量数据场景。
+3. **分布式事务**，TiDB 100% 支持标准的 ACID 事务。
+4. 真正金融级**高可用**，相比于传统主从 (M-S) 复制方案，基于 **Raft** 的多数派选举协议可以提供金融级的 100% 数据强一致性保证，且在不丢失大多数副本的前提下，可以实现故障的自动恢复 (auto-failover)，无需人工介入。
+5. 具有丰富的工具链生态，覆盖数据迁移、同步、备份等多种场景：[TiDB 生态工具功能概览](https://docs.pingcap.com/zh/tidb/stable/ecosystem-tool-user-guide)
+
+![](.\image\逻辑概览.png)
+
+### **兼容性对比**
+
+TiDB 支持包括**跨行事务**、**JOIN**、**子查询**在内的绝大多数 MySQL 的语法，可以直接使用 MySQL 客户端连接；对于已用 MySQL 的业务来讲，基本可以无缝切换到 TiDB。
+
+二者简单对比如下几方面：
+
+- 功能支持
+
+- - TiDB 尚不支持如下几项：
+
+  - 1. 存储过程与函数
+    2. 触发器
+    3. 事件
+    4. 自定义函数
+    5. 外键约束
+    6. 临时表
+    7. 全文/空间函数与索引
+    8. 非 `ascii`/`latin1`/`binary`/`utf8`/`utf8mb4` 的字符集
+
+- 默认设置
+
+- - 字符集、排序规则、sql_mode、lower_case_table_names 几项默认值不同
+
+- 事务
+
+- - TiDB 使用乐观事务模型，提交后注意检查返回值。
+  - TiDB 限制单个事务大小，保持事务尽可能的小。
+
+- 另，一些 MySQL 语法在 TiDB 中可以解析通过，不会产生任何作用，例如： create table 语句中 engine、partition 选项都是在解析后忽略。
+
+- **自增 ID**
+
+  - TiDB 的自增列**仅保证唯一**，也能保证**在单个 TiDB server 中自增**，但不保证多个 TiDB server 中自增，不保证自动分配的值的连续性，建议不要将缺省值和自定义值混用，若混用可能会收 `Duplicated Error` 的错误信息。
+  - TiDB 可通过 **`tidb_allow_remove_auto_inc`** 系统变量开启或者关闭允许移除列的 `AUTO_INCREMENT` 属性。删除列属性的语法是：`alter table modify` 或 `alter table change`。
+  - TiDB 不支持**添加**列的 `AUTO_INCREMENT` 属性，移除该属性后不可恢复。
+
+- 详细信息请访问官网：[与 MySQL 兼容性对比](https://docs.pingcap.com/zh/tidb/stable/mysql-compatibility)
 
 
 
 ## 存储模型TiKV
 
-TiKV 的选择是 **Key-Value 模型**，并且提供**有序遍历**方法。简单来讲，可以将 TiKV 看做一个巨大的 Map，其中 Key 和 Value 都是原始的 Byte 数组，在这个 Map 中，Key 按照 Byte 数组总的原始二进制比特位比较顺序排列。
+TiKV 的选择是 **Key-Value 模型**，并且提供**有序遍历**方法。简单来讲，可以将 TiKV 看做一个巨大的 Map，其中 Key 和 Value 都是原始的 **Byte 数组**，在这个 Map 中，Key 按照 Byte 数组总的原始二进制比特位比较顺序排列。
 
 1. 这是一个巨大的 Map，也就是存储的是 Key-Value pair
 2. 这个 Map 中的 Key-Value pair 按照 Key 的**二进制顺序有序**，也就是我们可以 Seek 到某一个 Key 的位置，然后不断的调用 Next 方法以递增的顺序获取比这个 Key 大的 Key-Value
+
+存储数据的**基本单位**是 **Region**，每个 Region 负责存储一个 **Key Range**（从 StartKey 到 EndKey 的**左闭右开**区间）的数据，每个 TiKV 节点会负责多个 Region。TiKV 的 API 在 KV 键值对层面提供对**分布式事务**的原生支持，默认提供了 **SI (Snapshot Isolation)** 的隔离级别，这也是 TiDB 在 SQL 层面支持分布式事务的核心。TiDB 的 SQL 层做完 SQL 解析后，会将 SQL 的执行计划转换为对 TiKV API 的实际调用。所以，数据都存储在 TiKV 中。另外，TiKV 中的数据都会自动维护**多副本**（默认为**三副本**），天然支持**高可用**和**自动故障转移**。
 
 
 
@@ -37,11 +87,20 @@ TiKV 利用 Raft 来做数据复制，**每个数据变更都会落地为一条 
 
 到这里我们总结一下，通过单机的 RocksDB，我们可以将数据快速地存储在磁盘上；通过 Raft，我们可以将数据复制到多台机器上，以防单机失效。数据的写入是通过 Raft 这一层的接口写入，而不是直接写 RocksDB。通过实现 Raft，我们拥有了一个分布式的 KV，现在再也不用担心某台机器挂掉了。
 
+![](.\image\数据写入RaftLog.png)
+
+**相关资料：**
+
+- Raft算法论文：https://raft.github.io/raft.pdf
+- Raft论文翻译：https://github.com/maemual/raft-zh_cn/blob/master/raft-zh_cn.md
+
 
 
 ### Region
 
-对于一个 KV 系统，将数据分散在多台机器上有两种比较典型的方案：一种是**按照 Key 做 Hash**，根据 Hash 值选择对应的存储节点；另一种是**分 Range**，**某一段连续的 Key 都保存在一个存储节点上**。TiKV 选择了**第二种**方式，将整个 Key-Value 空间分成很多段，每一段是一系列连续的 Key，我们将每一段叫做一个 **Region**，并且我们会尽量保持每个 Region 中保存的数据不超过一定的大小(这个大小可以配置，目前默认是 96mb)。每一个 Region 都可以用 StartKey 到 EndKey 这样一个左闭右开区间来描述。
+对于一个 KV 系统，将**数据分散在多台机器上**有两种比较典型的方案：一种是**按照 Key 做 Hash**，根据 Hash 值选择对应的存储节点；另一种是**分 Range**，**某一段连续的 Key 都保存在一个存储节点上**。TiKV 选择了**第二种**方式，将整个 Key-Value 空间分成很多段，每一段是一系列连续的 Key，我们将每一段叫做一个 **Region**，并且我们会尽量保持每个 Region 中保存的数据不超过一定的大小(这个大小可以配置，目前默认是 96mb)。每一个 Region 都可以用 StartKey 到 EndKey 这样一个**左闭右开区间**来描述。
+
+![](.\image\Region.png)
 
 将数据划分成 Region 后，我们将会做 **两件重要的事情**：
 
@@ -51,6 +110,8 @@ TiKV 利用 Raft 来做数据复制，**每个数据变更都会落地为一条 
 - 以 Region 为单位做 **Raft 的复制和成员管理**
   - TiKV 是以 Region 为单位做数据的复制，也就是**一个 Region 的数据会保存多个副本**，我们将每一个副本叫做一个 **Replica**。Replica 之间是通过 Raft 来保持数据的一致，一个 Region 的多个 Replica 会保存在不同的节点上，构成一个 Raft Group。
   - 其中一个 Replica 会作为这个 Group 的 Leader，其他的 Replica 作为 Follower。所有的读和写都是通过 Leader 进行，再由 Leader 复制给 Follower。 
+
+![](.\image\TiKV架构图.png)
 
 
 
@@ -92,17 +153,20 @@ TiKV 的 MVCC 实现是通过在 Key 后面添加 **Version** 来实现的。
 
 对于 Row，可以选择行存或者列存，这两种各有优缺点。TiDB 面向的首要目标是 OLTP 业务，这类业务需要支持快速地读取、保存、修改、删除一行数据，所以采用**行存储**是比较合适的。
 
+[详细描述（元信息等）](https://pingcap.com/blog-cn/tidb-internal-2/)
+
 ### 索引Index
 
-对于 Index，TiDB 不止需要支持 Primary Index，还需要支持 Secondary Index。Index 的作用的辅助查询，提升查询性能，以及保证某些 Constraint。查询的时候有两种模式，一种是点查，另一种是 Range 查询。Index 还分为 Unique Index 和 非 Unique Index，这两种都需要支持。
+对于 Index，TiDB 不止需要支持 Primary Index，还需要支持 Secondary Index。Index 的作用的辅助查询，提升查询性能，以及保证某些 Constraint。查询的时候有两种模式，一种是**点查**，另一种是 **Range 查询**。Index 还分为 Unique Index 和 非 Unique Index，这两种都需要支持。
 
-TiDB 对每个表分配一个 TableID，每一个索引都会分配一个 IndexID，每一行分配一个 RowID（如果表有整数型的 Primary Key，那么会用 Primary Key 的值当做 RowID），其中 TableID 在整个集群内唯一，IndexID/RowID 在表内唯一，这些 ID 都是 int64 类型。
+TiDB 对每个表分配一个 TableID，每一个索引都会分配一个 IndexID，每一行分配一个 RowID（如果表有整数型的 Primary Key，那么会用 Primary Key 的值当做 RowID），其中 **TableID 在整个集群内唯一**，**IndexID/RowID 在表内唯一**，这些 ID 都是 int64 类型。
 
 每行数据按照如下规则进行编码成 Key-Value pair：
 
 ```
 Key: tablePrefix{tableID}_recordPrefixSep{rowID}
 Value: [col1, col2, col3, col4]
+
 // index
 Key: tablePrefix{tableID}_indexPrefixSep{indexID}_indexedColumnsValue
 Value: rowID
@@ -116,14 +180,14 @@ TiDB Servers 这一层的节点都是无状态的节点，本身并不存储数�
 
 ### SQL运算
 
-将 SQL 查询映射为对 KV 的查询，再通过 KV 接口获取对应的数据，最后执行各种计算。比如 `Select count(*) from user where name="TiDB";` 这样一个语句，我们需要读取表中所有的数据，然后检查 `Name` 字段是否是 `TiDB`，如果是的话，则返回这一行。
+将 SQL 查询映射为对 KV 的查询，再通过 KV 接口获取对应的数据，最后执行各种计算。比如 **`Select count(*) from user where name="TiDB";`** 这样一个语句，我们需要读取表中所有的数据，然后检查 `Name` 字段是否是 `TiDB`，如果是的话，则返回这一行。
 
 这样一个操作流程转换为 KV 操作流程：
 
-- 构造出 Key Range：一个表中所有的 RowID 都在 `[0, MaxInt64)` 这个范围内，那么我们用 0 和 MaxInt64 根据 Row 的 Key 编码规则，就能构造出一个 `[StartKey, EndKey)` 的左闭右开区间
-- 扫描 Key Range：根据上面构造出的 Key Range，读取 TiKV 中的数据
-- 过滤数据：对于读到的每一行数据，计算 `name="TiDB"` 这个表达式，如果为真，则向上返回这一行，否则丢弃这一行数据
-- 计算 Count：对符合要求的每一行，累计到 Count 值上面
+- **构造出 Key Range**：一个表中所有的 RowID 都在 `[0, MaxInt64)` 这个范围内，那么我们用 0 和 MaxInt64 根据 Row 的 Key 编码规则，就能构造出一个 `[StartKey, EndKey)` 的左闭右开区间
+- **扫描 Key Range**：根据上面构造出的 Key Range，读取 TiKV 中的数据
+- **过滤数据**：对于读到的每一行数据，计算 `name="TiDB"` 这个表达式，如果为真，则向上返回这一行，否则丢弃这一行数据
+- **计算 Count**：对符合要求的每一行，累计到 Count 值上面
 
 这个方案肯定是可以 Work 的，但是并不能 Work 的很好，原因是显而易见的：
 
@@ -133,11 +197,23 @@ TiDB Servers 这一层的节点都是无状态的节点，本身并不存储数�
 
 ### 分布式 SQL 运算
 
+为了解决上述问题，计算应该需要**尽量靠近存储节点**，以避免大量的 RPC 调用。首先，SQL 中的谓词条件 `name = "TiDB"` 应被**下推到存储节点进行计算**，这样只需要返回有效的行，避免无意义的网络传输。然后，聚合函数 `Count(*)` 也可以被下推到存储节点，进行**预聚合**，每个节点只需要返回一个 `Count(*)` 的结果即可，再由 SQL 层将各个节点返回的 `Count(*)` 的结果累加求和。
+
+![](.\image\分布式SQL运算.png)
+
+用户的 SQL 请求会直接或者通过 **`Load Balancer`** 发送到 TiDB Server，TiDB Server 会解析 `MySQL Protocol Packet`，获取请求内容，对 SQL 进行语法解析和语义分析，制定和优化查询计划，执行查询计划并获取和处理数据。数据全部存储在 TiKV 集群中，所以在这个过程中 TiDB Server 需要和 TiKV 交互，获取数据。最后 TiDB Server 需要将查询结果返回给用户。
 
 
 
+## Placement Driver
 
-## 实践
+PD Server是整个 TiDB 集群的**元信息管理模块**，负责存储每个 TiKV 节点实时的**数据分布情况**和集群的整体拓扑结构，提供 **TiDB Dashboard 管控界面**，并为分布式事务**分配事务 ID**。PD 不仅存储元信息，同时还会根据 TiKV 节点实时上报的数据分布状态，下发**数据调度命令**给具体的 TiKV 节点，可以说是整个集群的“大脑”。此外，PD 本身也是由至少 3 个节点构成，拥有**高可用**的能力。建议部署**奇数**个 PD 节点。
+
+**集群调度详细介绍：**[三篇文章了解 TiDB 技术内幕 - 谈调度](https://pingcap.com/blog-cn/tidb-internal-3/)
+
+
+
+## 实践建议
 
 ### JDBC
 
@@ -206,8 +282,8 @@ MyBatis 的 Mapper 中支持两种参数：
 前面介绍了在 JDBC 中如何使用流式读取结果，除了 JDBC 相应的配置外，在 MyBatis 中如果希望读取超大结果集合也需要注意：
 
 - 可以通过在 mapper 配置中对单独一条 SQL **设置 `fetchSize`**，效果等同于调用 JDBC `setFetchSize`。
-- 可以使用带 `ResultHandler` 的查询接口来避免一次获取整个结果集。
-- 可以使用 `Cursor` 类来进行流式读取。
+- 可以使用带 **`ResultHandler`** 的查询接口来避免一次获取整个结果集。
+- 可以使用 **`Cursor`** 类来进行流式读取。
 
 对于使用 xml 配置映射，可以通过在映射 `<select>` 部分配置 `fetchSize="-2147483648"`(`Integer.MIN_VALUE`) 来流式读取结果。
 
@@ -247,13 +323,37 @@ Cursor<Post> queryAllPost();
 
 - `Simple`：每次执行都会向 JDBC 进行 prepare 语句的调用（如果 JDBC 配置有开启 `cachePrepStmts`，重复的 prepare 语句会复用）。
 - `Reuse`：在 `executor` 中缓存 prepare 语句，这样不用 JDBC 的 `cachePrepStmts` 也能减少重复 prepare 语句的调用。
-- `Batch`：每次更新只有在 `addBatch` 到 query 或 commit 时才会调用 `executeBatch` 执行，如果 JDBC 层开启了 `rewriteBatchStatements`，则会尝试改写，没有开启则会一条条发送。
+- `Batch`：每次更新只有在 `addBatch` 到 query 或 commit 时才会调用 `executeBatch` 执行，如果 JDBC 层开启了 **`rewriteBatchStatements`**，则会尝试改写，没有开启则会一条条发送。
 
 通常默认值是 `Simple`，需要在调用 `openSession` 时改变 `ExecutorType`。如果是 Batch 执行，会遇到事务中前面的 update 或 insert 都非常快，而在**读数据或 commit 事务时比较慢**的情况，这实际上是正常的，在排查慢 SQL 时需要注意。
 
 ```java
 configuration.setDefaultExecutorType(ExecutorType.Batch);
 ```
+
+
+
+### SQL
+
+#### **不要过度依赖单调递增的主键**
+
+**AUTO INCREMENT ID** 在传统的关系型数据库中，开发者经常会依赖自增 ID 来作为 PRIMARY KEY，但是其实大多数场景大家想要的只是一个**不重复**的 ID 而已，至于是不是自增其实无所谓，但是这个对于分布式数据库来说是不推荐的，随着插入的压力增大，会在这张**表的尾部 Region 形成热点**，而且这个热点并没有办法分散到多台机器。TiDB 在 GA 的版本中会对非自增 ID 主键进行优化，让 insert workload 尽可能分散。
+
+- 建议： 如果业务没有必要使用单调递增 ID 作为主键，就别用，使用**真正有意义的列作为主键**（一般来说，例如：邮箱、用户名等）， 使用**随机的 UUID** 或者**对单调递增的 ID 进行 bit-reverse （位反转）**
+
+#### **少用单调递增的索引 (比如时间戳)**
+
+很多日志类型的业务，因为经常需要按照时间的维度查询，所以很自然需要对 timestamp 创建索引，但是这类索引的问题本质上和单调递增主键是一样的，因为在 TiDB 的内部实现里，索引也是**一堆连续的 KV Pairs**，不断的插入单调递增的时间戳会造成索引尾部的 **Region 形成热点**，导致写入的吞吐受到影响。
+
+- 建议： 因为不可避免的，很多用户在使用 TiDB 存储日志，毕竟 TiDB 的弹性伸缩能力和 MySQL 兼容的查询特性是很适合这类业务的。另一方面，如果发现写入的压力实在扛不住，但是又非常想用 TiDB 来存储这种类型的数据，可以像 Spanner 建议的那样做 **Application 层面的 Sharding**，以存储日志为例，原来的可能在 TiDB 上创建一个 log 表，更好的模式是可以创建多个 log 表，如：log_1, log_2 … log_N，然后业务层插入的时候**根据时间戳进行 hash** ，随机分配到 1..N 这几个分片表中的一个。
+
+相应的，查询的时候需要将查询请求分发到各个分片上，最后在业务层汇总结果。
+
+**Region热点：**
+
+- 因为开始只有一个 Region，所有的写请求都发生在该 Region 所在的那台 TiKV 上。
+
+- 为解决上述场景中的热点问题，TiDB 引入了**预切分** Region 的功能，即可以根据指定的参数，预先为某个表切分出多个 Region，并打散到各个 TiKV 上去。[Splite Region](https://docs.pingcap.com/zh/tidb/stable/sql-statement-split-region)
 
 
 
@@ -265,11 +365,13 @@ configuration.setDefaultExecutorType(ExecutorType.Batch);
 
 
 
+### 迁移
+
+[mysql 数据迁移至 tidb实战经验](https://wiki.n.miui.com/pages/viewpage.action?pageId=441944983)
+
+
+
 ## 例子
-
-
-
-
 
 ### 在小米的应用实践
 
@@ -286,30 +388,6 @@ configuration.setDefaultExecutorType(ExecutorType.Batch);
 
 
 
-#### 兼容性对比
-
-**TiDB 支持包括跨行事务、JOIN、子查询在内的绝大多数 MySQL 的语法，可以直接使用 MySQL 客户端连接；对于已用 MySQL 的业务来讲，基本可以无缝切换到 TiDB。**
-
-二者简单对比如下几方面：
-
-- 功能支持
-  - TiDB 尚不支持如下几项：
-    - 增加、删除主键
-    - 非 UTF8 字符集
-    - 视图（即将支持）、存储过程、触发器、部分内置函数
-    - Event
-    - 全文索引、空间索引
-- 默认设置
-  - 字符集、排序规则、sql_mode、lower_case_table_names 几项默认值不同。
-- 事务
-  - TiDB 使用乐观事务模型，提交后注意检查返回值。
-  - TiDB 限制单个事务大小，保持事务尽可能的小。
-- TiDB 支持绝大多数的 Online DDL。
-- 另，一些 MySQL 语法在 TiDB 中可以解析通过，不会产生任何作用，例如： create table 语句中 engine、partition 选项都是在解析后忽略。
-- 详细信息可以访问官网：[与 MySQL 兼容性对比](https://pingcap.com/docs-cn/v3.0/reference/mysql-compatibility/)。
-
-
-
 #### 迁移过程
 
 整个迁移分为 2 大块：数据迁移、流量迁移。
@@ -318,10 +396,14 @@ configuration.setDefaultExecutorType(ExecutorType.Batch);
 
 数据迁移分为增量数据、存量数据两部分。
 
-- 对于存量数据，可以使用逻辑备份、导入的方式，除了传统的逻辑导入外，官方还提供一款物理导入的工具 TiDB Lightning。
-- 对于增量备份可以使用 TiDB 提供的 Syncer （新版已经更名为 DM - Data Migration）来保证数据同步。
+- 对于**存量数据**，可以使用逻辑备份、导入的方式，除了传统的逻辑导入外，官方还提供一款物理导入的工具 **TiDB Lightning**。
+- 对于**增量备份**可以使用 TiDB 提供的 **Syncer** （新版已经更名为 DM - Data Migration）来保证**数据同步**。
 
-Syncer 结构如图 6，主要依靠各种 Rule 来实现不同的过滤、合并效果，一个同步源对应一个 Syncer 进程，同步 Sharding 数据时则要多个 Syncer 进程。
+Syncer 结构如图，主要依靠各种 Rule 来实现不同的过滤、合并效果，一个同步源对应一个 Syncer 进程，同步 **Sharding** 数据时则要多个 Syncer 进程。
+
+> **警告：**
+>
+> **Syncer 目前已经不再维护，其功能已经完全被 [TiDB Data Migration](https://docs.pingcap.com/zh/tidb-data-migration/v1.0/overview)取代，强烈建议切换到 TiDB DM。**
 
 ![图 6 Syncer 结构图](https://download.pingcap.com/images/blog-cn/user-case-xiaomi/6.png)
 
@@ -338,3 +420,20 @@ Syncer 结构如图 6，主要依靠各种 Rule 来实现不同的过滤、合�
 
 - 读流量切换到 TiDB，这个过程中回滚比较简单，灰度无问题，则全量切换。
 - 再将写入切换到 TiDB，需要考虑好数据回滚方案或者采用双写的方式（需要断掉 Syncer）。
+
+#### 遇到的问题、原因及解决办法
+
+| 问题                                                         | 原因及解决办法                                               |
+| :----------------------------------------------------------- | :----------------------------------------------------------- |
+| 在一个 DDL 里不能对多个列或者多个索引做操作。                | ADD/DROP INDEX/COLUMN 操作目前不支持同时创建或删除多个索引或列，需要拆分单独执行，官方表示 3.0 版本有计划改进。 |
+| 部分操作符查询优化器支持不够好，比如 or 操作符会使用 TableScan，改写成 union all 可避免。 | 官方表示目前使用 or 操作符确实在执行计划上有可能不准确，已经在改进计划中，后续 3.0 版本会有优化。 |
+| 重启一个 PD 节点的时候，业务能捕捉到 PD 不可用的异常，会报 PD server timeout 。 | 因为重启的是 Leader 节点，所以重启之前需要手动切换 Leader，然后进行重启。官方建议这里可以通过重启前做 Leader 迁移来减缓，另外后续 TiDB 也会对网络通讯相关参数进行梳理和优化。 |
+| 建表语句执行速度相比 MySQL 较慢                              | 多台 TiDB 的时候，Owner 和接收 create table 语句的 TiDB Server 不在一台 Server 上时，可能比 MySQL 慢一些，每次操作耗时在 0.5s 左右，官方表示会在后续的版本中不断完善。 |
+| pd-ctl 命令行参数解析严格，多一个空格会提示语法错误。        | 官方表示低版本中可能会有这个问题，在 2.0.8 及以上版本已经改进。 |
+| tikv-ctl 命令手动 compact region 失败。                      | 在低版本中通常是因为 tikv-ctl 与集群版本不一致导致的，需要更换版本一致的 tikv-ctl，官方表示在 2.1 中已经修复。 |
+| 大表建索引时对业务有影响                                     | 官方建议在业务低峰期操作，在 2.1 版本中已经增加了操作优先级以及并发读的控制，情况有改善。 |
+| 存储空间放大问题                                             | 该问题属于 RocksDB，RocksDB 的空间放大系数最理想的值为 1.111，官方建议在某些场景下通过 TiKV 开启 RocksDB 的 dynamic-level-bytes 以减少空间放大。 |
+
+
+
+**集群部署、监控、出现的问题：**[TiDB 在小米的应用实践](https://pingcap.com/cases-cn/user-case-xiaomi/)
