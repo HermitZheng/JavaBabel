@@ -315,7 +315,7 @@ MyBatis 的 Mapper 中支持两种参数：
 ```
 
 ```java
-public List<Integer> selectForwardOnly() {
+public List<Integer> getAll() {
     final List<Integer> list = new ArrayList<>();
     testMapper.selectForwardOnly(new ResultHandler<Integer>() {
         @Override
@@ -373,7 +373,9 @@ configuration.setDefaultExecutorType(ExecutorType.Batch);
 **Region热点：**
 
 - 因为开始只有一个 Region，所有的写请求都发生在该 Region 所在的那台 TiKV 上。
-- 为解决上述场景中的热点问题，TiDB 引入了**预切分** Region 的功能，即可以根据指定的参数，预先为某个表切分出多个 Region，并打散到各个 TiKV 上去。[Splite Region](https://docs.pingcap.com/zh/tidb/stable/sql-statement-split-region)
+- 为解决上述场景中的热点问题，TiDB 引入了**预切分** Region 的功能，即可以根据指定的参数，预先为某个表切分出多个 Region，并打散到各个 TiKV 上去。
+- 例如，对于表 t，如果想要从 `minInt64`~`maxInt64` 之间均匀切割出 16 个 Region，可以用以下语句：**```SPLIT TABLE t BETWEEN (-9223372036854775808) AND (9223372036854775807) REGIONS 16;```**
+- [Splite Region](https://docs.pingcap.com/zh/tidb/stable/sql-statement-split-region)
 
 #### 查询优化
 
