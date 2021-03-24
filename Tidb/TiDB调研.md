@@ -14,7 +14,7 @@ TiDB 结合了传统的 RDBMS 和 NoSQL 的最佳特性，兼容 MySQL 协议，
 4. 真正金融级**高可用**，相比于传统主从 (M-S) 复制方案，基于 **Raft** 的多数派选举协议可以提供金融级的 100% 数据强一致性保证，且在不丢失大多数副本的前提下，可以实现故障的自动恢复 (auto-failover)，无需人工介入。
 5. 具有丰富的工具链生态，覆盖数据迁移、同步、备份等多种场景：[TiDB 生态工具功能概览](https://docs.pingcap.com/zh/tidb/stable/ecosystem-tool-user-guide)
 
-![](.\image\逻辑概览.png)
+
 
 ### **兼容性对比**
 
@@ -23,7 +23,6 @@ TiDB 支持包括**跨行事务**、**JOIN**、**子查询**在内的绝大多�
 二者简单对比如下几方面：
 
 - 功能支持
-
 - - TiDB 尚不支持如下几项：
 
   - 1. 存储过程与函数
@@ -34,27 +33,44 @@ TiDB 支持包括**跨行事务**、**JOIN**、**子查询**在内的绝大多�
     6. 临时表
     7. 全文/空间函数与索引
     8. 非 `ascii`/`latin1`/`binary`/`utf8`/`utf8mb4` 的字符集
-
 - 默认设置
-
 - - 字符集、排序规则、sql_mode、lower_case_table_names 几项默认值不同
-
 - 事务
-
-- - TiDB 使用乐观事务模型，提交后注意检查返回值。
-  - TiDB 限制单个事务大小，保持事务尽可能的小。
-
+- - TiDB 使用乐观事务模型，提交后注意检查返回值。[乐观事务模型](https://docs.pingcap.com/zh/tidb/stable/optimistic-transaction)
+  - TiDB 限制单个事务大小，保持事务尽可能的小。（4.0支持大事务，最大事务限制由 100 MB 提升到了 10 GB，同时支持乐观事务和悲观事务）
 - 另，一些 MySQL 语法在 TiDB 中可以解析通过，不会产生任何作用，例如： create table 语句中 engine、partition 选项都是在解析后忽略。
-
 - **自增 ID**
 
   - TiDB 的自增列**仅保证唯一**，也能保证**在单个 TiDB server 中自增**，但不保证多个 TiDB server 中自增，不保证自动分配的值的连续性，建议不要将缺省值和自定义值混用，若混用可能会收 `Duplicated Error` 的错误信息。
   - TiDB 可通过 **`tidb_allow_remove_auto_inc`** 系统变量开启或者关闭允许移除列的 `AUTO_INCREMENT` 属性。删除列属性的语法是：`alter table modify` 或 `alter table change`。
   - TiDB 不支持**添加**列的 `AUTO_INCREMENT` 属性，移除该属性后不可恢复。
-
 - 详细信息请访问官网：[与 MySQL 兼容性对比](https://docs.pingcap.com/zh/tidb/stable/mysql-compatibility)
 
+### 优缺点分析
 
+**优点：**
+
+- 原生支持Online DDL；加列，主键扩容字段都是秒级的
+- count(*)等**计算速度**特别快：分布式计算下推至存储节点
+
+- 原业务的 MySQL 的业务遇到单机容量或者性能瓶颈时，可以考虑使用 TiDB 无缝替换 MySQL；高度兼容MySQL
+  - 吞吐量、存储和计算能力的**水平扩展**
+  - 水平伸缩时不停服务
+  - **强一致性**分布式 ACID 事务
+- 大数据量下，MySQL 复杂查询很慢，数据增长很快，接近单机处理的极限；TiDB有高并发实时写入、实时查询、实时统计分析的能力
+- 分库分表或者使用数据库中间件等Sharding方案，对业务侵入性较大、对业务有约束；而TiDB可以进行水平弹性扩展
+- 有分布式事务、多数据中心的数据 100% 强一致性、auto-failover 的高可用的能力
+
+**缺点：**
+
+- 对硬盘（SSD）、内存、CPU等**机器性能**要求很高
+- GC可能有问题（GC 的速度跟不上写入），导致存储占用会持续增大；对于数据量过大的事务，会**占用大量内存**
+- 列数：MySQL 是 1024 列，TiDB 目前限制是 512 列。
+- 对于一些复杂SQL，以及一些Mysql特性，TiDB不完全兼容；且由于索引存储结构不同，优化方式也不同
+- TiDB版本迭代较快，可能出现新旧版本不兼容的现象
+- 分布式事务两阶段提交，使得**网络交互**增多
+
+![](.\image\逻辑概览.png)
 
 ## 存储模型TiKV
 
@@ -164,12 +180,17 @@ TiDB 对每个表分配一个 TableID，每一个索引都会分配一个 IndexI
 每行数据按照如下规则进行编码成 Key-Value pair：
 
 ```
+// row
 Key: tablePrefix{tableID}_recordPrefixSep{rowID}
 Value: [col1, col2, col3, col4]
 
 // index
 Key: tablePrefix{tableID}_indexPrefixSep{indexID}_indexedColumnsValue
 Value: rowID
+
+// ununique index
+Key: tablePrefix{tableID}_indexPrefixSep{indexID}_indexedColumnsValue_rowID
+Value: null
 ```
 
 
@@ -294,7 +315,7 @@ MyBatis 的 Mapper 中支持两种参数：
 ```
 
 ```java
-public List<Integer> selectForwardOnly() {
+public List<Integer> getAll() {
     final List<Integer> list = new ArrayList<>();
     testMapper.selectForwardOnly(new ResultHandler<Integer>() {
         @Override
@@ -352,8 +373,27 @@ configuration.setDefaultExecutorType(ExecutorType.Batch);
 **Region热点：**
 
 - 因为开始只有一个 Region，所有的写请求都发生在该 Region 所在的那台 TiKV 上。
+- 为解决上述场景中的热点问题，TiDB 引入了**预切分** Region 的功能，即可以根据指定的参数，预先为某个表切分出多个 Region，并打散到各个 TiKV 上去。
+- 例如，对于表 t，如果想要从 `minInt64`~`maxInt64` 之间均匀切割出 16 个 Region，可以用以下语句：**```SPLIT TABLE t BETWEEN (-9223372036854775808) AND (9223372036854775807) REGIONS 16;```**
+- [Splite Region](https://docs.pingcap.com/zh/tidb/stable/sql-statement-split-region)
 
-- 为解决上述场景中的热点问题，TiDB 引入了**预切分** Region 的功能，即可以根据指定的参数，预先为某个表切分出多个 Region，并打散到各个 TiKV 上去。[Splite Region](https://docs.pingcap.com/zh/tidb/stable/sql-statement-split-region)
+#### 查询优化
+
+本质上 TiDB 的 SQL 引擎更像是一个分布式计算框架，对于大表的数据因为本身 TiDB 会**将数据分散到多个存储节点上**，能**将查询逻辑下推**，会大大的提升查询的效率。
+
+**TiDB 基于规则的优化有：** ***谓词下推*** 谓词下推会将 where/on/having 条件推到离数据表尽可能近的地方，比如：
+
+```
+select * from t join s on t.id = s.id where t.c1 < 10
+```
+
+可以被 TiDB 自动改写成
+
+```
+select * from (select * from t where t.c1 < 10) as t join s on t.id = s.id
+```
+
+更多相关优化例子：[TiDB的正确使用姿势](https://pingcap.com/blog-cn/how-to-use-tidb/)
 
 
 
